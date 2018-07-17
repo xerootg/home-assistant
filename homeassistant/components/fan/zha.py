@@ -4,7 +4,6 @@ Fans on Zigbee Home Automation networks.
 For more details on this platform, please refer to the documentation
 at https://home-assistant.io/components/fan.zha/
 """
-import asyncio
 import logging
 from homeassistant.components import zha
 from homeassistant.components.fan import (
@@ -38,20 +37,33 @@ VALUE_TO_SPEED = {i: speed for i, speed in enumerate(SPEED_LIST)}
 SPEED_TO_VALUE = {speed: i for i, speed in enumerate(SPEED_LIST)}
 
 
-@asyncio.coroutine
-def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
-    """Set up the Zigbee Home Automation fans."""
+async def async_setup_platform(hass, config, async_add_devices,
+                               discovery_info=None):
+    """Set up the Zigbee Home Automation switches."""
     discovery_info = zha.get_discovery_info(hass, discovery_info)
     if discovery_info is None:
         return
 
-    async_add_devices([ZhaFan(**discovery_info)], update_before_add=True)
+    from zigpy.zcl.clusters.hvac import Fan
+    in_clusters = discovery_info['in_clusters']
+    cluster = in_clusters[Fan.cluster_id]
+    await cluster.bind()
+    await cluster.configure_reporting(0, 0, 600, 1,)
 
+    async_add_devices([ZhaFan(**discovery_info)], update_before_add=True)
 
 class ZhaFan(zha.Entity, FanEntity):
     """Representation of a ZHA fan."""
 
     _domain = DOMAIN
+    value_attribute = 0
+
+    def attribute_updated(self, attribute, value):
+        """Handle attribute update from device."""
+        _LOGGER.debug("Attribute updated: %s %s %s", self, attribute, value)
+        if attribute == self.value_attribute:
+            self._state = value
+            self.async_schedule_update_ha_state()
 
     @property
     def supported_features(self) -> int:
@@ -75,34 +87,31 @@ class ZhaFan(zha.Entity, FanEntity):
             return False
         return self._state != SPEED_OFF
 
-    @asyncio.coroutine
-    def async_turn_on(self, speed: str = None, **kwargs) -> None:
+    async def async_turn_on(self, speed: str = None, **kwargs) -> None:
         """Turn the entity on."""
         if speed is None:
-            speed = SPEED_MEDIUM
+            speed = SPEED_ON
 
-        yield from self.async_set_speed(speed)
+        await self.async_set_speed(speed)
 
-    @asyncio.coroutine
-    def async_turn_off(self, **kwargs) -> None:
+    async def async_turn_off(self, **kwargs) -> None:
         """Turn the entity off."""
-        yield from self.async_set_speed(SPEED_OFF)
+        await self.async_set_speed(SPEED_OFF)
 
-    @asyncio.coroutine
-    def async_set_speed(self: FanEntity, speed: str) -> None:
+    async def async_set_speed(self: FanEntity, speed: str) -> None:
         """Set the speed of the fan."""
-        yield from self._endpoint.fan.write_attributes({
+        await self._endpoint.fan.write_attributes({
             'fan_mode': SPEED_TO_VALUE[speed]})
 
         self._state = speed
         self.async_schedule_update_ha_state()
 
-    @asyncio.coroutine
-    def async_update(self):
+    async def async_update(self):
         """Retrieve latest state."""
-        result = yield from zha.safe_read(self._endpoint.fan, ['fan_mode'])
+        result = await zha.safe_read(self._endpoint.fan, ['fan_mode'])
         new_value = result.get('fan_mode', None)
-        self._state = VALUE_TO_SPEED.get(new_value, None)
+        self._state = VALUE_TO_SPEED.get(new_value, self._state)
+        _LOGGER.debug(self._state)
 
     @property
     def should_poll(self) -> bool:
